@@ -398,6 +398,10 @@ uvicorn token_audit.main:app --host 0.0.0.0 --port 8000
 - 管理端路径：`/admin/login`。
 - New-API 正常流量优先，审计失败不能影响中转站可用性。
 
+## 友情链接
+
+- [LINUX DO](https://linux.do/)：高质量技术社区。
+
 ## License
 
 This project is open-sourced under the [MIT License](LICENSE).
