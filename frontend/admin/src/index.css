@@ -1,0 +1,275 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #080a13;
+  color: #f8fbff;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#token-audit-admin-root {
+  min-height: 100%;
+  margin: 0;
+}
+
+html {
+  scrollbar-gutter: stable;
+}
+
+body {
+  min-width: 320px;
+  overflow-x: hidden;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+@layer base {
+  ::selection {
+    background: rgba(45, 212, 191, 0.35);
+    color: #ffffff;
+  }
+}
+
+@layer components {
+  .app-shell {
+    min-height: 100vh;
+    background:
+      radial-gradient(circle at 12% 12%, rgba(45, 212, 191, 0.22), transparent 28%),
+      radial-gradient(circle at 86% 18%, rgba(167, 139, 250, 0.22), transparent 30%),
+      radial-gradient(circle at 68% 88%, rgba(251, 113, 133, 0.14), transparent 28%),
+      linear-gradient(135deg, #080a13 0%, #111827 44%, #07111c 100%);
+    position: relative;
+    isolation: isolate;
+  }
+
+  .app-shell::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: -2;
+    background-image:
+      linear-gradient(rgba(255, 255, 255, 0.045) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255, 255, 255, 0.045) 1px, transparent 1px);
+    background-size: 44px 44px;
+    mask-image: radial-gradient(circle at 50% 30%, black, transparent 76%);
+  }
+
+  .app-shell::after {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    background:
+      linear-gradient(120deg, rgba(255, 255, 255, 0.12), transparent 24%, transparent 76%, rgba(255, 255, 255, 0.06)),
+      radial-gradient(circle at 50% -10%, rgba(255, 255, 255, 0.13), transparent 34%);
+    opacity: 0.7;
+  }
+
+  .glass-panel {
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    background:
+      linear-gradient(145deg, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.055)),
+      rgba(8, 13, 28, 0.46);
+    box-shadow: 0 24px 70px rgba(0, 0, 0, 0.32), inset 0 1px 0 rgba(255, 255, 255, 0.14);
+    backdrop-filter: blur(22px);
+    -webkit-backdrop-filter: blur(22px);
+  }
+
+  .glass-card {
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    background:
+      linear-gradient(145deg, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.055)),
+      rgba(8, 13, 28, 0.46);
+    box-shadow: 0 24px 70px rgba(0, 0, 0, 0.32), inset 0 1px 0 rgba(255, 255, 255, 0.14);
+    backdrop-filter: blur(22px);
+    -webkit-backdrop-filter: blur(22px);
+    @apply rounded-2xl transition duration-200 ease-out;
+  }
+
+  .glass-card:hover {
+    border-color: rgba(255, 255, 255, 0.24);
+    background:
+      linear-gradient(145deg, rgba(255, 255, 255, 0.17), rgba(255, 255, 255, 0.07)),
+      rgba(8, 13, 28, 0.52);
+    box-shadow: 0 28px 80px rgba(0, 0, 0, 0.38), 0 0 34px rgba(45, 212, 191, 0.12);
+  }
+
+  .glass-button {
+    @apply inline-flex min-h-10 items-center justify-center gap-2 rounded-xl border border-white/15 px-4 py-2 text-sm font-medium text-slate-50 transition duration-200 ease-out;
+    background:
+      linear-gradient(135deg, rgba(45, 212, 191, 0.22), rgba(167, 139, 250, 0.12)),
+      rgba(255, 255, 255, 0.075);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.16);
+  }
+
+  .glass-button:hover {
+    border-color: rgba(103, 232, 249, 0.5);
+    box-shadow: 0 0 26px rgba(45, 212, 191, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.2);
+    transform: translateY(-1px);
+  }
+
+  .glass-button:active {
+    transform: scale(0.98);
+  }
+
+  .glass-button-muted {
+    @apply inline-flex min-h-10 items-center justify-center gap-2 rounded-xl border border-white/15 px-4 py-2 text-sm font-medium text-slate-50 transition duration-200 ease-out;
+    background: rgba(255, 255, 255, 0.065);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.16);
+  }
+
+  .glass-input {
+    @apply min-h-10 w-full rounded-xl border border-white/15 bg-white/[0.07] px-3 py-2 text-sm text-slate-50 outline-none transition duration-200 placeholder:text-slate-400;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  }
+
+  select.glass-input {
+    color-scheme: dark;
+    background-color: rgba(15, 23, 42, 0.68);
+  }
+
+  select.glass-input option,
+  select.glass-input optgroup {
+    background-color: #0f172a;
+    color: #e2e8f0;
+  }
+
+  select.glass-input option:checked {
+    background-color: #164e63;
+    color: #f8fafc;
+  }
+
+  select.glass-input option:disabled {
+    color: #64748b;
+  }
+
+  .glass-input:focus {
+    border-color: rgba(103, 232, 249, 0.62);
+    box-shadow: 0 0 0 3px rgba(45, 212, 191, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.12);
+  }
+
+  .status-pill {
+    @apply inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-medium;
+  }
+
+  .table-shell {
+    @apply overflow-hidden rounded-2xl border border-white/10 bg-white/[0.035];
+  }
+
+  .table-shell table {
+    @apply w-full border-collapse text-left text-sm;
+  }
+
+  .table-shell th {
+    @apply border-b border-white/10 bg-white/[0.05] px-4 py-3 text-xs font-semibold uppercase tracking-wider text-slate-300;
+  }
+
+  .table-shell td {
+    @apply border-b border-white/10 px-4 py-3 align-top text-slate-200;
+  }
+
+  .table-shell tr:last-child td {
+    @apply border-b-0;
+  }
+
+  .prompt-markdown {
+    @apply text-sm leading-7 text-slate-100;
+  }
+
+  .prompt-markdown > * + * {
+    margin-top: 1rem;
+  }
+
+  .prompt-markdown h1,
+  .prompt-markdown h2,
+  .prompt-markdown h3,
+  .prompt-markdown h4 {
+    @apply font-semibold text-white;
+  }
+
+  .prompt-markdown h1 {
+    @apply text-2xl;
+  }
+
+  .prompt-markdown h2 {
+    @apply text-xl;
+  }
+
+  .prompt-markdown h3 {
+    @apply text-lg;
+  }
+
+  .prompt-markdown p,
+  .prompt-markdown li {
+    @apply text-slate-200;
+  }
+
+  .prompt-markdown ul,
+  .prompt-markdown ol {
+    @apply pl-5;
+  }
+
+  .prompt-markdown ul {
+    @apply list-disc;
+  }
+
+  .prompt-markdown ol {
+    @apply list-decimal;
+  }
+
+  .prompt-markdown blockquote {
+    @apply border-l-2 border-cyan-200/40 bg-white/[0.04] px-4 py-2 text-slate-300;
+  }
+
+  .prompt-markdown code {
+    @apply rounded-md border border-white/10 bg-slate-950/55 px-1.5 py-0.5 text-cyan-100;
+  }
+
+  .prompt-markdown pre {
+    @apply overflow-auto rounded-2xl border border-white/10 bg-slate-950/70 p-4;
+  }
+
+  .prompt-markdown pre code {
+    @apply border-0 bg-transparent p-0 text-slate-100;
+  }
+
+  .prompt-markdown table {
+    @apply w-full border-collapse overflow-hidden rounded-2xl text-left text-sm;
+  }
+
+  .prompt-markdown th,
+  .prompt-markdown td {
+    @apply border border-white/10 px-3 py-2 align-top;
+  }
+
+  .prompt-markdown th {
+    @apply bg-white/[0.08] text-slate-100;
+  }
+
+  .prompt-markdown td {
+    @apply bg-white/[0.035] text-slate-200;
+  }
+
+  .prompt-markdown a {
+    @apply text-cyan-100 underline decoration-cyan-200/40 underline-offset-4;
+  }
+}

@@ -9,3 +9,7 @@ audit-reports/
 *.db
 *.db-shm
 *.db-wal
+frontend/admin/node_modules/
+frontend/admin/dist/
+token_audit/admin_dist/
+*.tsbuildinfo

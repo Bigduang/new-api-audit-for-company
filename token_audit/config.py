@@ -57,6 +57,9 @@ class Settings:
     wecom_agent_id: int
     public_base_url: str
     report_access_token: str
+    admin_user: str
+    admin_password: str
+    admin_session_ttl_seconds: int
     retention_days: int
     max_body_bytes: int
 
@@ -80,6 +83,9 @@ class Settings:
             wecom_agent_id=_int_env("WX_AGENT_ID", 0),
             public_base_url=os.getenv("AUDIT_PUBLIC_BASE_URL", "").rstrip("/"),
             report_access_token=os.getenv("AUDIT_REPORT_ACCESS_TOKEN", ""),
+            admin_user=os.getenv("AUDIT_ADMIN_USER", ""),
+            admin_password=os.getenv("AUDIT_ADMIN_PASSWORD", ""),
+            admin_session_ttl_seconds=_int_env("AUDIT_ADMIN_SESSION_TTL_SECONDS", 43200),
             retention_days=_int_env("AUDIT_RETENTION_DAYS", 30),
             max_body_bytes=_int_env("AUDIT_MAX_BODY_BYTES", 2 * 1024 * 1024),
         )
@@ -117,6 +123,9 @@ def settings_for_tests(
         wecom_agent_id=0,
         public_base_url="",
         report_access_token="test-report-token",
+        admin_user="admin",
+        admin_password="admin-password",
+        admin_session_ttl_seconds=43200,
         retention_days=30,
         max_body_bytes=max_body_bytes,
     )

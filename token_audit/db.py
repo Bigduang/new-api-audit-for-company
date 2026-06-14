@@ -52,13 +52,89 @@ def migrate(session_factory: sessionmaker[Session]) -> None:
 
 def _migrate_existing_schema(engine: Engine) -> None:
     inspector = inspect(engine)
-    if "audit_requests" not in inspector.get_table_names():
+    table_names = inspector.get_table_names()
+    if "audit_requests" not in table_names:
         return
     columns = {column["name"] for column in inspector.get_columns("audit_requests")}
     if "prompt_omitted" not in columns:
         default = "false" if engine.dialect.name == "postgresql" else "0"
         with engine.begin() as conn:
             conn.execute(text(f"ALTER TABLE audit_requests ADD COLUMN prompt_omitted BOOLEAN NOT NULL DEFAULT {default}"))
+        columns.add("prompt_omitted")
+    classification_columns = (
+        {column["name"] for column in inspector.get_columns("audit_classifications")}
+        if "audit_classifications" in table_names
+        else set()
+    )
+    _ensure_performance_indexes(engine, columns, classification_columns)
+
+
+def _ensure_performance_indexes(engine: Engine, request_columns: set[str], classification_columns: set[str]) -> None:
+    index_specs = [
+        (
+            {
+                "created_at",
+                "user_id",
+                "username",
+                "token_id",
+                "token_name",
+                "model_name",
+                "prompt_tokens",
+                "completion_tokens",
+                "quota",
+            },
+            """
+            CREATE INDEX IF NOT EXISTS idx_audit_requests_created_usage_cover
+            ON audit_requests (
+                created_at,
+                user_id,
+                username,
+                token_id,
+                token_name,
+                model_name,
+                prompt_tokens,
+                completion_tokens,
+                quota
+            )
+            """,
+        ),
+        (
+            {
+                "user_id",
+                "username",
+                "model_name",
+                "created_at",
+                "prompt_tokens",
+                "completion_tokens",
+                "quota",
+            },
+            """
+            CREATE INDEX IF NOT EXISTS idx_audit_requests_user_usage_cover
+            ON audit_requests (
+                user_id,
+                username,
+                model_name,
+                created_at,
+                prompt_tokens,
+                completion_tokens,
+                quota
+            )
+            """,
+        ),
+    ]
+    with engine.begin() as conn:
+        for required_columns, statement in index_specs:
+            if required_columns.issubset(request_columns):
+                conn.execute(text(statement))
+        if {"work_verdict", "request_id"}.issubset(classification_columns):
+            conn.execute(
+                text(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_audit_classifications_verdict_request
+                    ON audit_classifications (work_verdict, request_id)
+                    """
+                )
+            )
 
 
 def session_scope(session_factory: sessionmaker[Session]) -> Generator[Session, None, None]:

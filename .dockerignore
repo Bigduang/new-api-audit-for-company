@@ -5,6 +5,9 @@ __pycache__
 .pytest_cache
 data
 audit-reports
+frontend/admin/node_modules
+frontend/admin/dist
+token_audit/admin_dist
 *.db
 *.db-shm
 *.db-wal

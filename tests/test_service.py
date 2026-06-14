@@ -10,9 +10,10 @@ from token_audit.config import settings_for_tests
 from token_audit.crypto import EncryptedText, decrypt_text, sign_payload
 from token_audit.db import create_session_factory, migrate
 from token_audit.main import create_app
-from token_audit.models import AuditClassification, AuditDailyReport, AuditDeadletter, AuditRequest, AuditUserWorkSummary
+from token_audit.models import AuditClassification, AuditDailyReport, AuditDeadletter, AuditRequest, AuditUser, AuditUserWorkSummary
 from token_audit.repository import upsert_usage_event
 from token_audit.schemas import UsageAuditEvent
+from token_audit.audit_users import identity_key_for, sync_audit_users_from_requests, update_audit_user
 
 
 def _client():
@@ -34,6 +35,29 @@ def _post_signed(client: TestClient, path: str, payload: dict, secret: str = "te
             "X-Audit-Signature": sign_payload(secret, ts, raw),
         },
     )
+
+
+def _enable_audit_user(app, *, user_id: int | None, username: str, display_name: str = "") -> str:
+    identity_key = identity_key_for(user_id, username)
+    with app.state.session_factory() as session:
+        sync_audit_users_from_requests(session)
+        update_audit_user(session, identity_key, display_name=display_name, audit_enabled=True)
+        session.commit()
+    return identity_key
+
+
+def _login_admin(client: TestClient):
+    return client.post(
+        "/admin/api/login",
+        json={"username": "admin", "password": "admin-password"},
+        follow_redirects=False,
+    )
+
+
+def _csrf_from_session(client: TestClient) -> str:
+    session = client.get("/admin/api/session")
+    assert session.status_code == 200
+    return session.json()["csrf_token"]
 
 
 def test_request_and_usage_events_merge_and_encrypt_prompt():
@@ -112,6 +136,7 @@ def test_daily_report_requires_token_and_renders_html():
             "quota": 2_620_000,
         }
         assert _post_signed(client, "/internal/new-api/audit/usage", usage).status_code == 200
+        _enable_audit_user(_app, user_id=7, username="alice")
 
         unauthorized = client.get("/reports/daily")
         assert unauthorized.status_code == 403
@@ -127,6 +152,156 @@ def test_daily_report_requires_token_and_renders_html():
         assert "不确定" in ok.text
         assert "Non-work" not in ok.text
         assert "2.6M" in ok.text
+
+
+def test_admin_login_logout_and_csrf_protect_users_page():
+    for client, _app, _settings in _client():
+        protected = client.get("/admin/api/users", follow_redirects=False)
+        assert protected.status_code == 401
+
+        spa = client.get("/admin/users")
+        assert spa.status_code == 200
+        assert "token-audit-admin-root" in spa.text
+
+        wrong = client.post(
+            "/admin/api/login",
+            json={"username": "admin", "password": "bad"},
+        )
+        assert wrong.status_code == 401
+        assert wrong.json()["detail"] == "invalid admin credentials"
+
+        ok = _login_admin(client)
+        assert ok.status_code == 200
+        assert ok.json()["ok"] is True
+
+        session = client.get("/admin/api/session")
+        assert session.status_code == 200
+        assert session.json()["authenticated"] is True
+
+        dashboard = client.get("/admin/api/dashboard")
+        assert dashboard.status_code == 200
+        assert dashboard.json()["ok"] is True
+
+        requests = client.get("/admin/api/requests")
+        assert requests.status_code == 200
+        assert "requests" in requests.json()
+
+        daily = client.get("/admin/reports/daily")
+        assert daily.status_code == 200
+        assert "token-audit-admin-root" in daily.text
+
+        report_url = client.get("/admin/api/report-url?date=2026-06-14")
+        assert report_url.status_code == 200
+        assert report_url.json()["url"] == "/admin/reports/daily/view?date=2026-06-14"
+
+        daily_view = client.get("/admin/reports/daily/view")
+        assert daily_view.status_code == 200
+        assert "Token 审计日报" in daily_view.text
+
+        no_csrf = client.post("/admin/api/users/sync")
+        assert no_csrf.status_code == 403
+
+        csrf = _csrf_from_session(client)
+        logout = client.post("/admin/api/logout", headers={"X-CSRF-Token": csrf}, follow_redirects=False)
+        assert logout.status_code == 200
+        protected_again = client.get("/admin/api/users", follow_redirects=False)
+        assert protected_again.status_code == 401
+
+
+def test_admin_request_preview_endpoint_preserves_markdown_preview():
+    for client, _app, _settings in _client():
+        preview = "# 需求\n\n- 实现请求历史弹窗..."
+        markdown = "# 需求\n\n- 实现请求历史弹窗\n\n```ts\nconst ok = true;\n```\n\n最终内容"
+        request = {
+            "request_id": "req-md-preview",
+            "user_id": 7,
+            "username": "alice",
+            "token_id": 11,
+            "token_name": "coding",
+            "model_name": "gpt-test",
+            "request_path": "/v1/chat/completions",
+            "relay_format": "openai",
+            "prompt_preview": preview,
+            "prompt_text": markdown,
+        }
+        assert _post_signed(client, "/internal/new-api/audit/request", request).status_code == 200
+
+        protected = client.get("/admin/api/requests/req-md-preview/preview")
+        assert protected.status_code == 401
+
+        assert _login_admin(client).status_code == 200
+        listed = client.get("/admin/api/requests")
+        assert listed.status_code == 200
+        item = listed.json()["requests"][0]
+        assert item["request_id"] == "req-md-preview"
+        assert "\n" not in item["preview"]
+
+        detail = client.get("/admin/api/requests/req-md-preview/preview")
+        assert detail.status_code == 200
+        assert detail.json()["prompt_preview"] == markdown
+        assert detail.json()["prompt_preview_short"] == preview
+        assert detail.json()["prompt_text"] == markdown
+        assert detail.json()["prompt_source"] == "encrypted_full"
+        assert detail.json()["user"] == "alice"
+
+
+def test_admin_sync_defaults_user_disabled_then_enabling_changes_report_name():
+    for client, app, _settings in _client():
+        request = {
+            "request_id": "req-admin-user",
+            "user_id": 77,
+            "username": "alice",
+            "token_id": 11,
+            "token_name": "coding",
+            "model_name": "gpt-test",
+            "request_path": "/v1/chat/completions",
+            "relay_format": "openai",
+            "prompt_text": "请帮我实现一个管理端用户列表",
+        }
+        usage = {
+            "request_id": "req-admin-user",
+            "user_id": 77,
+            "username": "alice",
+            "token_id": 11,
+            "token_name": "coding",
+            "model_name": "gpt-test",
+            "prompt_tokens": 100,
+            "completion_tokens": 50,
+            "quota": 150,
+        }
+        assert _post_signed(client, "/internal/new-api/audit/request", request).status_code == 200
+        assert _post_signed(client, "/internal/new-api/audit/usage", usage).status_code == 200
+
+        assert _login_admin(client).status_code == 200
+        csrf = _csrf_from_session(client)
+        sync = client.post("/admin/api/users/sync", headers={"X-CSRF-Token": csrf})
+        assert sync.status_code == 200
+        assert sync.json()["created"] == 1
+
+        identity_key = identity_key_for(77, "alice")
+        with app.state.session_factory() as session:
+            row = session.scalar(select(AuditUser).where(AuditUser.identity_key == identity_key))
+            assert row is not None
+            assert row.audit_enabled is False
+
+        hidden = client.get("/reports/daily?start=2020-01-01&end=2099-01-01&token=test-report-token")
+        assert hidden.status_code == 200
+        assert "alice" not in hidden.text
+
+        patch = client.patch(
+            f"/admin/api/users/{identity_key}",
+            headers={"X-CSRF-Token": csrf},
+            json={"display_name": "张三", "audit_enabled": True, "notes": "后端"},
+        )
+        assert patch.status_code == 200
+
+        shown = client.get("/reports/daily?start=2020-01-01&end=2099-01-01&token=test-report-token")
+        assert shown.status_code == 200
+        assert "张三" in shown.text
+
+        history = client.get(f"/admin/api/users/{identity_key}/requests")
+        assert history.status_code == 200
+        assert history.json()["requests"][0]["preview"] == "请帮我实现一个管理端用户列表"
 
 
 def test_push_wecom_saves_daily_report_snapshot(monkeypatch):
@@ -184,6 +359,7 @@ def test_push_wecom_saves_daily_report_snapshot(monkeypatch):
         }
         assert _post_signed(client, "/internal/new-api/audit/request", request).status_code == 200
         assert _post_signed(client, "/internal/new-api/audit/usage", usage).status_code == 200
+        _enable_audit_user(app, user_id=7, username="alice")
 
         response = client.post("/reports/push-wecom?start=2020-01-01&end=2099-01-01")
         assert response.status_code == 200
@@ -278,6 +454,7 @@ def test_summarize_work_job_writes_user_summary_and_daily_html(monkeypatch):
         }
         assert _post_signed(client, "/internal/new-api/audit/request", request).status_code == 200
         assert _post_signed(client, "/internal/new-api/audit/usage", usage).status_code == 200
+        _enable_audit_user(app, user_id=7, username="alice")
 
         summarized = client.post("/jobs/summarize-work?start=2020-01-01&end=2099-01-01").json()
         assert summarized["summarized_users"] == 1
@@ -418,7 +595,9 @@ def test_migrate_adds_prompt_omitted_to_existing_sqlite_schema(tmp_path):
 
     with engine.connect() as conn:
         columns = {row["name"] for row in conn.execute(text("PRAGMA table_info(audit_requests)")).mappings()}
+        tables = {row["name"] for row in conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'")).mappings()}
     assert "prompt_omitted" in columns
+    assert "audit_users" in tables
 
 
 def test_concurrent_usage_upsert_with_same_request_id_is_idempotent(tmp_path):
@@ -491,6 +670,7 @@ def test_classify_and_reports_identify_non_work_user():
         }
         assert _post_signed(client, "/internal/new-api/audit/request", request).status_code == 200
         assert _post_signed(client, "/internal/new-api/audit/usage", usage).status_code == 200
+        _enable_audit_user(app, user_id=8, username="bob")
         assert client.post("/jobs/classify?start=2020-01-01&end=2099-01-01").json()["classified"] == 1
 
         suspicious = client.get("/reports/suspicious?start=2020-01-01&end=2099-01-01").text

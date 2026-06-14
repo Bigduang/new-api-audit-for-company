@@ -5,7 +5,9 @@ import json
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from sqlalchemy.orm import load_only
 
+from .audit_users import display_name_for, enabled_audit_user_map, request_identity_key
 from .models import AuditClassification, AuditDailyReport, AuditRequest, AuditUserWorkSummary
 from .timeutil import fmt_local
 
@@ -17,17 +19,61 @@ VERDICT_LABELS = {
 }
 
 
+def _request_report_load():
+    return load_only(
+        AuditRequest.request_id,
+        AuditRequest.created_at,
+        AuditRequest.user_id,
+        AuditRequest.username,
+        AuditRequest.token_id,
+        AuditRequest.token_name,
+        AuditRequest.model_name,
+        AuditRequest.prompt_preview,
+        AuditRequest.prompt_tokens,
+        AuditRequest.completion_tokens,
+        AuditRequest.quota,
+        AuditRequest.usage_collected,
+        AuditRequest.prompt_omitted,
+    )
+
+
+def _classification_report_load():
+    return load_only(
+        AuditClassification.request_id,
+        AuditClassification.category,
+        AuditClassification.work_verdict,
+        AuditClassification.confidence,
+        AuditClassification.reason,
+        AuditClassification.review_status,
+    )
+
+
 def build_report_context(session: Session, start: datetime, end: datetime, tz_name: str) -> dict:
-    rows = session.execute(
+    all_rows = session.execute(
         select(AuditRequest, AuditClassification)
         .outerjoin(AuditClassification, AuditClassification.request_id == AuditRequest.request_id)
+        .options(_request_report_load(), _classification_report_load())
         .where(AuditRequest.created_at >= start, AuditRequest.created_at <= end)
         .order_by(AuditRequest.created_at.asc())
     ).all()
+    enabled_users = enabled_audit_user_map(session)
+    rows = []
     aggregates: dict[tuple[int | None, str, int | None, str], dict[str, object]] = {}
     verdict_counts: Counter[str] = Counter()
-    for req, cls in rows:
-        key = (req.user_id, req.username, req.token_id, req.token_name)
+    enabled_identity_keys = set(enabled_users)
+    display_names_by_user_id: dict[int, str] = {}
+    display_names_by_username: dict[str, str] = {}
+    for req, cls in all_rows:
+        user = enabled_users.get(request_identity_key(req))
+        if user is None or not user.audit_enabled:
+            continue
+        rows.append((req, cls))
+        display_name = display_name_for(user, req.user_id, req.username)
+        if req.user_id is not None:
+            display_names_by_user_id[req.user_id] = display_name
+        elif req.username:
+            display_names_by_username[req.username] = display_name
+        key = (req.user_id, display_name, req.token_id, req.token_name)
         data = aggregates.setdefault(
             key,
             {
@@ -77,10 +123,12 @@ def build_report_context(session: Session, start: datetime, end: datetime, tz_na
     for req, cls in rows:
         if cls is None or cls.work_verdict not in {"non_work", "uncertain"}:
             continue
+        user = enabled_users.get(request_identity_key(req))
+        display_name = display_name_for(user, req.user_id, req.username)
         suspicious_rows.append(
             {
                 "time": fmt_local(req.created_at, tz_name),
-                "username": req.username or req.user_id or "unknown",
+                "username": display_name,
                 "token": req.token_name or req.token_id or "unknown",
                 "model": req.model_name,
                 "total_tokens": req.prompt_tokens + req.completion_tokens,
@@ -101,7 +149,11 @@ def build_report_context(session: Session, start: datetime, end: datetime, tz_na
         )
         .order_by(AuditUserWorkSummary.total_tokens.desc())
     ).all()
-    work_summaries = [_work_summary_from_row(row) for row in summary_rows]
+    work_summaries = [
+        _work_summary_from_row(row, display_names_by_user_id, display_names_by_username)
+        for row in summary_rows
+        if _summary_row_enabled(row, enabled_identity_keys, display_names_by_user_id, display_names_by_username)
+    ]
     return {
         "rows": rows,
         "start_label": fmt_local(start, tz_name),
@@ -274,7 +326,29 @@ def _td(label: str, value: object, *, full_value: object | None = None, class_na
     return f'<td data-label="{escape(label)}"{cls}{title}>{escape(str(value))}</td>'
 
 
-def _work_summary_from_row(row: AuditUserWorkSummary) -> dict:
+def _summary_row_enabled(
+    row: AuditUserWorkSummary,
+    enabled_identity_keys: set[str],
+    display_names_by_user_id: dict[int, str],
+    display_names_by_username: dict[str, str],
+) -> bool:
+    if row.user_id is not None:
+        return f"uid-{row.user_id}" in enabled_identity_keys
+    return row.username in display_names_by_username or row.username in set(display_names_by_username.values())
+
+
+def _work_summary_from_row(
+    row: AuditUserWorkSummary,
+    display_names_by_user_id: dict[int, str] | None = None,
+    display_names_by_username: dict[str, str] | None = None,
+) -> dict:
+    display_names_by_user_id = display_names_by_user_id or {}
+    display_names_by_username = display_names_by_username or {}
+    username = row.username or row.user_id or "unknown"
+    if row.user_id is not None and row.user_id in display_names_by_user_id:
+        username = display_names_by_user_id[row.user_id]
+    elif row.username in display_names_by_username:
+        username = display_names_by_username[row.username]
     try:
         data = json.loads(row.summary_json or "{}")
     except json.JSONDecodeError:
@@ -283,7 +357,7 @@ def _work_summary_from_row(row: AuditUserWorkSummary) -> dict:
     if not isinstance(functions, list):
         functions = []
     return {
-        "username": row.username or row.user_id or "unknown",
+        "username": username,
         "request_count": row.request_count,
         "total_tokens": row.total_tokens,
         "confidence_overall": str(data.get("confidence_overall") or row.confidence_overall or ""),
@@ -354,6 +428,214 @@ def wecom_daily_summary_from_context(context: dict, detail_url: str) -> tuple[st
 def daily_html_report(session: Session, start: datetime, end: datetime, tz_name: str) -> str:
     context = build_report_context(session, start, end, tz_name)
     return daily_html_report_from_context(context)
+
+
+def _daily_report_css() -> str:
+    return """
+    :root {
+      --bg-0: #090b18;
+      --text: #f7fbff;
+      --text-soft: rgba(247, 251, 255, .76);
+      --muted: rgba(224, 232, 255, .58);
+      --stroke: rgba(255, 255, 255, .18);
+      --shadow: 0 22px 70px rgba(0, 0, 0, .34);
+      --shadow-soft: 0 14px 40px rgba(0, 0, 0, .24);
+      --cyan: #55f1e6;
+      --blue: #7cb7ff;
+      --magenta: #ff7ad9;
+      --violet: #b59cff;
+      --amber: #ffd36a;
+      --green: #8df5b4;
+      --red: #ff8a9a;
+    }
+    html { min-height: 100%; background: var(--bg-0); }
+    body {
+      min-height: 100vh;
+      color: var(--text);
+      background:
+        linear-gradient(135deg, rgba(16, 20, 42, .98), rgba(8, 12, 26, .96) 42%, rgba(12, 25, 34, .97)),
+        conic-gradient(from 210deg at 50% -12%, rgba(85, 241, 230, .24), rgba(255, 122, 217, .18), rgba(124, 183, 255, .14), rgba(255, 211, 106, .10), rgba(85, 241, 230, .20));
+      overflow-x: hidden;
+    }
+    body::before,
+    body::after {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+    }
+    body::before {
+      z-index: -2;
+      background:
+        linear-gradient(110deg, rgba(85, 241, 230, .13), transparent 28%, rgba(255, 122, 217, .11) 58%, transparent 78%),
+        linear-gradient(165deg, transparent 8%, rgba(124, 183, 255, .12) 38%, transparent 66%, rgba(255, 211, 106, .08));
+      filter: saturate(1.12);
+    }
+    body::after {
+      z-index: -1;
+      opacity: .42;
+      background-image:
+        linear-gradient(rgba(255, 255, 255, .045) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255, 255, 255, .035) 1px, transparent 1px);
+      background-size: 34px 34px;
+      mask-image: linear-gradient(to bottom, rgba(0, 0, 0, .95), rgba(0, 0, 0, .18));
+    }
+    header {
+      border-bottom: 1px solid rgba(255, 255, 255, .13);
+      background: linear-gradient(135deg, rgba(255, 255, 255, .13), rgba(255, 255, 255, .055));
+      backdrop-filter: blur(24px) saturate(1.28);
+      -webkit-backdrop-filter: blur(24px) saturate(1.28);
+      box-shadow: 0 18px 48px rgba(0, 0, 0, .22);
+    }
+    .hero-inner, main { width: min(1180px, calc(100% - 32px)); }
+    h1 { color: #ffffff; font-size: 29px; }
+    h2 { color: #ffffff; }
+    .kicker { color: var(--cyan); font-weight: 780; }
+    .meta { color: var(--muted); }
+    .metric,
+    .work-card,
+    .table-wrap,
+    .weak-note,
+    .summary-empty {
+      position: relative;
+      border: 1px solid var(--stroke);
+      border-radius: 8px;
+      background:
+        linear-gradient(140deg, rgba(255, 255, 255, .145), rgba(255, 255, 255, .052) 52%, rgba(255, 255, 255, .09)),
+        linear-gradient(180deg, rgba(255, 255, 255, .07), rgba(255, 255, 255, .035));
+      box-shadow: var(--shadow-soft), inset 0 1px 0 rgba(255, 255, 255, .18);
+      backdrop-filter: blur(22px) saturate(1.26);
+      -webkit-backdrop-filter: blur(22px) saturate(1.26);
+    }
+    .metric::before,
+    .work-card::before,
+    .table-wrap::before,
+    .weak-note::before,
+    .summary-empty::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      border-radius: inherit;
+      pointer-events: none;
+      background:
+        linear-gradient(135deg, rgba(255, 255, 255, .22), transparent 36%),
+        linear-gradient(315deg, rgba(85, 241, 230, .10), transparent 32%);
+      opacity: .7;
+    }
+    .metric {
+      transition: transform .2s ease, border-color .2s ease, box-shadow .2s ease;
+    }
+    .metric:hover,
+    .work-card:hover,
+    .table-wrap:hover {
+      border-color: rgba(255, 255, 255, .30);
+      box-shadow: var(--shadow), 0 0 0 1px rgba(85, 241, 230, .06), inset 0 1px 0 rgba(255, 255, 255, .24);
+    }
+    .metric:hover { transform: translateY(-2px); }
+    .metric span,
+    .work-meta,
+    .weak-note,
+    .summary-empty {
+      color: var(--muted);
+    }
+    .metric strong { color: var(--text); }
+    .metric.accent strong {
+      color: var(--cyan);
+      text-shadow: 0 0 24px rgba(85, 241, 230, .24);
+    }
+    .metric.warn strong {
+      color: var(--amber);
+      text-shadow: 0 0 22px rgba(255, 211, 106, .18);
+    }
+    .section-head::before {
+      width: 5px;
+      background: linear-gradient(180deg, var(--cyan), var(--magenta));
+      box-shadow: 0 0 18px rgba(85, 241, 230, .46);
+    }
+    .work-card-head {
+      border-bottom: 1px solid rgba(255, 255, 255, .12);
+    }
+    .work-user,
+    .work-card li strong,
+    td.identity {
+      color: #ffffff;
+    }
+    .work-card-head strong {
+      color: var(--cyan);
+      text-shadow: 0 0 20px rgba(85, 241, 230, .22);
+    }
+    .work-confidence,
+    .work-card li span {
+      border: 1px solid rgba(255, 255, 255, .14);
+      background: rgba(255, 255, 255, .08);
+      color: var(--text-soft);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, .08);
+    }
+    .work-card li {
+      border-left-color: rgba(85, 241, 230, .58);
+    }
+    .work-card li p,
+    td,
+    .long-text {
+      color: var(--text-soft);
+    }
+    table { min-width: 980px; }
+    th, td {
+      border-bottom: 1px solid rgba(255, 255, 255, .10);
+    }
+    th {
+      background: rgba(16, 20, 40, .82);
+      color: rgba(235, 250, 255, .90);
+      backdrop-filter: blur(18px) saturate(1.22);
+      -webkit-backdrop-filter: blur(18px) saturate(1.22);
+    }
+    tr.data-row {
+      transition: background .16s ease;
+    }
+    tr.data-row:hover {
+      background: rgba(255, 255, 255, .045);
+    }
+    .badge {
+      border: 1px solid rgba(255, 255, 255, .13);
+      background: rgba(255, 255, 255, .09);
+      color: #e9fbff;
+    }
+    .badge.work {
+      border-color: rgba(141, 245, 180, .38);
+      background: rgba(141, 245, 180, .14);
+      color: #dfffe9;
+    }
+    .badge.non_work {
+      border-color: rgba(255, 138, 154, .38);
+      background: rgba(255, 138, 154, .15);
+      color: #ffe0e6;
+    }
+    .badge.uncertain {
+      border-color: rgba(255, 211, 106, .38);
+      background: rgba(255, 211, 106, .14);
+      color: #ffedbd;
+    }
+    @media (max-width: 760px) {
+      .table-wrap {
+        background: transparent;
+        backdrop-filter: none;
+        -webkit-backdrop-filter: none;
+      }
+      .table-wrap::before { display: none; }
+      tr.data-row {
+        border: 1px solid rgba(255, 255, 255, .15);
+        background: linear-gradient(140deg, rgba(255, 255, 255, .12), rgba(255, 255, 255, .055));
+        box-shadow: var(--shadow-soft), inset 0 1px 0 rgba(255, 255, 255, .14);
+        backdrop-filter: blur(18px) saturate(1.2);
+        -webkit-backdrop-filter: blur(18px) saturate(1.2);
+      }
+      td::before { color: var(--muted); }
+      .empty {
+        border: 1px solid rgba(255, 255, 255, .15);
+        background: linear-gradient(140deg, rgba(255, 255, 255, .12), rgba(255, 255, 255, .055));
+      }
+    }
+    """
 
 
 def daily_html_report_from_context(context: dict) -> str:
@@ -594,6 +876,7 @@ def daily_html_report_from_context(context: dict) -> str:
       td {{ grid-template-columns: 82px minmax(0, 1fr); }}
     }}
   </style>
+  <style>{_daily_report_css()}</style>
 </head>
 <body>
   <header>

@@ -9,6 +9,7 @@ import requests
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from .audit_users import display_name_for, enabled_audit_user_map, request_identity_key
 from .config import Settings
 from .llm_classifier import parse_llm_json_object
 from .models import AuditClassification, AuditRequest, AuditUserWorkSummary
@@ -58,26 +59,33 @@ def summarize_user_work(
         .where(AuditRequest.created_at >= start, AuditRequest.created_at <= end)
         .order_by(AuditRequest.created_at.asc())
     ).all()
+    enabled_users = enabled_audit_user_map(session)
     by_user: dict[str, list[tuple[AuditRequest, AuditClassification | None]]] = defaultdict(list)
     for req, cls in rows:
-        username = req.username or str(req.user_id or "unknown")
+        user = enabled_users.get(request_identity_key(req))
+        if user is None or not user.audit_enabled:
+            continue
+        username = display_name_for(user, req.user_id, req.username)
         by_user[username].append((req, cls))
 
     count = 0
     for username, items in sorted(by_user.items(), key=lambda item: _total_tokens(item[1]), reverse=True):
-        existing = session.scalar(
-            select(AuditUserWorkSummary).where(
-                AuditUserWorkSummary.period_start == start,
-                AuditUserWorkSummary.period_end == end,
-                AuditUserWorkSummary.username == username,
-            )
+        existing_query = select(AuditUserWorkSummary).where(
+            AuditUserWorkSummary.period_start == start,
+            AuditUserWorkSummary.period_end == end,
         )
+        if items[0][0].user_id is not None:
+            existing_query = existing_query.where(AuditUserWorkSummary.user_id == items[0][0].user_id)
+        else:
+            existing_query = existing_query.where(AuditUserWorkSummary.username == username)
+        existing = session.scalar(existing_query)
         if existing is not None and not force:
             continue
         payload = _user_payload(username, items, start, end, max_samples_per_user=max_samples_per_user)
         result = _summarize_with_llm(settings, payload)
         row = existing or AuditUserWorkSummary(period_start=start, period_end=end, username=username)
         row.user_id = payload["user_id"]
+        row.username = username
         row.request_count = payload["request_count"]
         row.total_tokens = payload["total_tokens"]
         row.sample_count = len(payload["sampled_requests"])

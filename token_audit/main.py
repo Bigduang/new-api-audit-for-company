@@ -1,14 +1,17 @@
 import json
 import hmac
 from contextlib import asynccontextmanager
+from pathlib import Path
 from urllib.parse import urlencode
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
+from .admin import create_admin_router
 from .config import Settings
 from .crypto import verify_signature
 from .db import create_session_factory, migrate
@@ -41,6 +44,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title="Token Audit Service", version="0.1.0", lifespan=lifespan)
     app.state.settings = settings
     app.state.session_factory = session_factory
+    admin_assets = Path(__file__).parent / "admin_dist" / "assets"
+    if admin_assets.exists():
+        app.mount("/admin/assets", StaticFiles(directory=admin_assets), name="admin-assets")
+    app.include_router(create_admin_router())
 
     def get_session() -> Session:
         session = session_factory()

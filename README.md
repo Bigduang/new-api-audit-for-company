@@ -1,39 +1,42 @@
 # Token Audit
 
-New-API Token 使用与工作用途审计服务。
+New-API Token usage and work-purpose audit service.
 
-语言版本：中文 | [English](docs/i18n/README.en.md) | [日本語](docs/i18n/README.ja.md) | [한국어](docs/i18n/README.ko.md)
+Language: Chinese | [English](docs/i18n/README.en.md) | [日本語](docs/i18n/README.ja.md) | [한국어](docs/i18n/README.ko.md)
 
 ## 项目定位
 
-`token-audit` 是一个独立运行的审计服务，用来接收 [Bigduang/new-api-audit](https://github.com/Bigduang/new-api-audit) 上报的审计事件，按 `request_id` 合并请求内容和最终用量，保存到本地 SQLite，并在每天用量稳定后生成审计日报。
+`token-audit` 是一个独立运行的审计服务，用来接收 [Bigduang/new-api-audit](https://github.com/Bigduang/new-api-audit) 上报的请求事件和用量事件，按 `request_id` 合并 prompt、用户、token、模型、tokens、quota 等信息，保存到本地 SQLite，并在每天用量稳定后生成审计日报。
 
-它解决的问题不是“实时限流”，而是“事后可追溯”：
+它解决的不是实时限流，而是事后可追溯：
 
 - 统计一段时间内每个用户、每个 token 的请求数、Prompt Tokens、Completion Tokens、总 Tokens 和 quota。
-- 判断请求是否用于工作，尤其是开发、调试、架构、部署、文档、数据分析等场景。
-- 对疑似非工作或无法判断的请求保留用户、token、模型、tokens、分类原因和 prompt 预览，方便人工复核。
+- 判断请求是否用于工作，尤其是开发、调试、架构、部署、文档、代码审查、数据分析等场景。
+- 对疑似非工作或无法判断的请求保留用户、token、模型、tokens、分类原因和 prompt 预览，方便复核。
+- 提供轻量管理端，用来启用/停用审计用户、维护日报显示名、查看请求历史和完整 Prompt。
 - 生成移动端友好的 HTML 日报，并通过企业微信 textcard 推送摘要和详情链接。
-- 只保存 30 天左右的细节数据，适合 VPS 上的小型公司内部中转站。
+- 使用 SQLite 和 30 天保留策略，适合 VPS 上的小型公司内部中转站。
 
-## 工作方式
+## 当前架构
 
 New-API 侧只做极小 hook，不让审计服务影响正常请求：
 
 1. 请求解析后，上报 request event：用户、token、模型、请求路径、prompt hash、prompt preview 和完整 prompt。
 2. 消费结算后，上报 usage event：prompt tokens、completion tokens、quota、channel、group、耗时和上游 request id。
 3. `token-audit` 用 `request_id` 做 upsert，即使 request/usage 先后顺序反过来也能关联。
-4. 完整 prompt 使用 AES-GCM 加密保存；报告默认只展示 `prompt_preview`。
-5. 分类和日报一般在第二天早上运行，例如 `06:05 Asia/Shanghai` 审计前一天数据。
+4. 完整 prompt 使用 AES-GCM 加密保存到 SQLite；列表和日报默认只展示短预览。
+5. 管理员登录管理端后，可以在请求历史弹窗中按需解密查看完整 Prompt。
+6. 分类和日报一般在第二天早上运行，例如 `06:05 Asia/Shanghai` 审计前一天数据。
 
 ```mermaid
 flowchart LR
   A["New-API request hook"] -->|signed request event| B["token-audit FastAPI"]
-  C["New-API consume log hook"] -->|signed usage event| B
+  C["New-API consume hook"] -->|signed usage event| B
   B --> D["SQLite audit_requests"]
   D --> E["rule + LLM classifier"]
-  E --> F["daily HTML report snapshot"]
+  E --> F["daily report snapshot"]
   F --> G["Enterprise WeChat textcard"]
+  B --> H["React admin console"]
 ```
 
 ## 核心功能
@@ -41,13 +44,48 @@ flowchart LR
 - FastAPI 接收 New-API 内部审计事件。
 - HMAC-SHA256 验签和时间窗防重放。
 - SQLite WAL 模式，适合单机 VPS 部署。
-- `audit_requests` 保存请求和用量关联状态。
+- 覆盖索引优化总览、用户列表和请求历史查询，避免扫描加密 prompt 大字段。
+- React + Vite + Tailwind 管理端，Docker 构建后由同一个 Python 容器托管静态文件。
+- `audit_requests` 保存请求、用户/token、prompt 加密密文、用量和关联状态。
+- `audit_users` 保存审计用户配置，不修改原始请求日志。
 - `audit_classifications` 保存规则/LLM 分类结果和人工复核状态。
 - `audit_user_work_summaries` 保存按用户归纳的工作内容。
 - `audit_daily_reports` 保存日报 HTML、摘要 JSON、企业微信返回结果。
-- `audit_events_deadletter` 保存验签失败、非法 payload、过大 payload 等异常事件。
+- `audit_events_deadletter` 保存验签失败、非法 payload、无法处理事件等异常。
 - 企业微信 textcard 推送，避免企业微信 Markdown 渲染差的问题。
-- 大数字在 HTML 中自动压缩为 `K/M/B`，鼠标悬停保留完整数值。
+- 大数字在页面中自动压缩为 `K/M/B`，减少移动端占位。
+
+## 管理端
+
+管理端路径：
+
+```text
+https://ai-audit.example.com/admin/login
+```
+
+技术栈：
+
+- Vite + React + TypeScript
+- Tailwind CSS
+- lucide-react
+- react-markdown + remark-gfm
+
+生产容器不运行 Node；Node 只在 Docker 多阶段构建中执行 `npm ci && npm run build`。
+
+管理端能力：
+
+- `/admin/dashboard`：审计总览，只展示稳定的实时统计和今日 Top5 用量，不展示当天未跑任务前容易误导的分类统计。
+- `/admin/users`：历史发现用户、启用/停用审计、维护日报显示名和备注。
+- `/admin/users/{identity}`：用户配置、用户统计和单用户请求历史。
+- `/admin/requests`：全局请求历史，支持用户、token、模型、分类结论、时间范围筛选。
+- `/admin/reports/daily`：按日期查看日报。
+
+请求历史的 Prompt 处理：
+
+- 列表中只展示短摘要，避免大字段拖慢页面。
+- 点击某条请求时，单独调用详情接口。
+- 详情接口优先解密 `prompt_ciphertext` 返回完整 Prompt，并用 Markdown 渲染。
+- 若历史数据没有密文、解密失败或 New-API compact event 省略了完整 prompt，则回退显示预览并提示原因。
 
 ## 接口
 
@@ -57,6 +95,22 @@ New-API 调用的内部接口：
 | --- | --- | --- |
 | `POST` | `/internal/new-api/audit/request` | 接收请求元数据和 prompt |
 | `POST` | `/internal/new-api/audit/usage` | 接收最终 token/quota 用量 |
+
+管理端接口：
+
+| Method | Path | 说明 |
+| --- | --- | --- |
+| `GET` | `/admin/api/session` | 当前登录状态和 CSRF token |
+| `POST` | `/admin/api/login` | 管理员登录 |
+| `POST` | `/admin/api/logout` | 退出登录 |
+| `GET` | `/admin/api/dashboard` | 审计总览统计 |
+| `GET` | `/admin/api/users` | 审计用户列表 |
+| `PATCH` | `/admin/api/users/{identity_key}` | 更新显示名、是否纳入审计、备注 |
+| `POST` | `/admin/api/users/sync` | 从历史请求同步用户配置 |
+| `GET` | `/admin/api/users/{identity_key}/requests` | 单用户请求历史 |
+| `GET` | `/admin/api/requests` | 全局请求历史 |
+| `GET` | `/admin/api/requests/{request_id}/preview` | 解密并返回完整 Prompt |
+| `GET` | `/admin/api/report-url` | 管理端日报 iframe URL |
 
 运维和报表接口：
 
@@ -78,6 +132,21 @@ New-API 上报必须带：
 X-Audit-Timestamp: <unix timestamp>
 X-Audit-Signature: hex(hmac_sha256(timestamp + "." + raw_body, AUDIT_SECRET))
 ```
+
+## 数据表
+
+主要 SQLite 表：
+
+| 表 | 说明 |
+| --- | --- |
+| `audit_requests` | 请求、用户/token、prompt 加密密文、tokens、quota、关联状态 |
+| `audit_users` | 审计用户配置，包含显示名、是否纳入日报、备注 |
+| `audit_classifications` | 分类结果、工作/非工作结论、置信度、复核状态 |
+| `audit_user_work_summaries` | LLM 按用户归纳的工作功能摘要 |
+| `audit_daily_reports` | 日报 HTML 快照、摘要 JSON、企业微信返回结果 |
+| `audit_events_deadletter` | 异常事件和无法处理的 payload |
+
+`audit_users` 不删除；原始明细、分类、日报和工作摘要按 `AUDIT_RETENTION_DAYS` 清理。
 
 ## 配置
 
@@ -101,7 +170,7 @@ PY
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `AUDIT_DATABASE_URL` | `sqlite:///./token_audit.db` | SQLAlchemy 数据库 URL，生产推荐 SQLite 文件 |
-| `AUDIT_SECRET` | 空 | New-API 和审计服务共享的 HMAC 密钥 |
+| `AUDIT_SECRET` | 空 | New-API 和审计服务共享的 HMAC 密钥，也用于派生管理端 cookie 签名密钥 |
 | `AUDIT_PROMPT_ENCRYPTION_KEY` | 空 | AES-GCM 密钥，支持 `base64:`、`hex:` 或原始字符串 |
 | `AUDIT_SIGNATURE_TOLERANCE_SECONDS` | `300` | 验签时间窗口 |
 | `AUDIT_TIMEZONE` | `Asia/Shanghai` | 报表展示时区 |
@@ -109,6 +178,14 @@ PY
 | `AUDIT_MAX_BODY_BYTES` | `2097152` | 接收端最大请求体 |
 | `AUDIT_PUBLIC_BASE_URL` | 空 | HTML 日报公网地址前缀 |
 | `AUDIT_REPORT_ACCESS_TOKEN` | 空 | `/reports/daily` 访问 token |
+
+管理端：
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `AUDIT_ADMIN_USER` | 空 | 管理员用户名 |
+| `AUDIT_ADMIN_PASSWORD` | 空 | 管理员密码 |
+| `AUDIT_ADMIN_SESSION_TTL_SECONDS` | `43200` | 管理端登录 cookie 有效期 |
 
 LLM 分类和工作摘要：
 
@@ -194,7 +271,7 @@ AUDIT_EXCLUDED_TOKEN_NAMES=audit-classifier
 分类当天数据：
 
 ```bash
-python -m token_audit.cli classify
+python -m token_audit.cli classify --start 2026-06-02 --end 2026-06-02
 ```
 
 归纳指定日期每个人在做什么功能：
@@ -240,6 +317,8 @@ Docker 线上脚本：
 3. `push-wecom`
 4. `cleanup`
 
+分类不是实时执行。当天管理端请求历史可能暂时显示“未分类”，这是预期行为；第二天早上任务跑完后，日报和复核清单会使用分类结果。
+
 ## 报表访问
 
 日报详情页：
@@ -257,7 +336,7 @@ curl -X POST 'http://localhost:8000/jobs/classify?start=2026-06-02&end=2026-06-0
 curl -X POST 'http://localhost:8000/jobs/summarize-work?start=2026-06-02&end=2026-06-02'
 ```
 
-公网 Nginx 不建议暴露 `/jobs/*`、`/reports/token-usage`、`/reports/suspicious`。如果必须暴露，请增加额外认证。公网通常只代理 `/reports/daily`，并依赖 `AUDIT_REPORT_ACCESS_TOKEN`。
+公网 Nginx 不建议暴露 `/jobs/*`、`/reports/token-usage`、`/reports/suspicious`。如果必须暴露，请增加额外认证。公网通常只代理 `/admin/*` 和 `/reports/daily`，其中 `/admin/*` 自带管理员登录，`/reports/daily` 依赖 `AUDIT_REPORT_ACCESS_TOKEN`。
 
 ## 人工复核
 
@@ -276,12 +355,22 @@ curl -X PATCH http://localhost:8000/audit-requests/<request_id>/review \
 
 ## 本地开发
 
+后端：
+
 ```bash
 python -m venv .venv
 . .venv/bin/activate
 pip install -e .
 pip install -r requirements-dev.txt
 pytest -q
+```
+
+前端：
+
+```bash
+cd frontend/admin
+npm ci
+npm run build
 ```
 
 本地启动：
@@ -296,14 +385,15 @@ uvicorn token_audit.main:app --host 0.0.0.0 --port 8000
 
 - 不要提交 `.env`、SQLite 数据库、日志、日报导出或真实 API key。
 - `AUDIT_PROMPT_ENCRYPTION_KEY` 丢失后无法解密历史完整 prompt，必须妥善备份。
-- 报告默认只展示 prompt 预览，不展示完整 prompt。
-- LLM 工作摘要只使用 `prompt_preview` 抽样，不解密完整 prompt。
+- 请求历史列表、日报和企业微信推送默认只展示 prompt 预览。
+- 管理端完整 Prompt 查看需要管理员登录，且只在点击单条请求时解密。
+- LLM 分类和工作摘要使用规则筛选后的 prompt 内容；分类器自身 token 应加入 `AUDIT_EXCLUDED_TOKEN_NAMES`。
 - 企业微信推送只发摘要卡片，完整详情留在受 token 保护的 HTML 页面。
-- `AUDIT_EXCLUDED_TOKEN_NAMES` 应包含分类器自身使用的 New-API token，避免审计请求污染员工统计。
 
 ## 当前线上约定
 
 - 数据库：SQLite。
 - 详细数据保留：30 天。
-- 审计时间：每天早上约 06:00，处理前一天数据。
+- 审计时间：每天早上约 06:05，处理前一天数据。
+- 管理端路径：`/admin/login`。
 - New-API 正常流量优先，审计失败不能影响中转站可用性。

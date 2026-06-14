@@ -49,6 +49,23 @@ class AuditRequest(Base):
     relation_status: Mapped[str] = mapped_column(String(32), default="pending_usage", index=True)
 
 
+class AuditUser(Base):
+    __tablename__ = "audit_users"
+    __table_args__ = (UniqueConstraint("identity_key", name="uq_audit_users_identity_key"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    identity_key: Mapped[str] = mapped_column(String(255), index=True)
+    user_id: Mapped[int | None] = mapped_column(Integer, index=True, nullable=True)
+    username: Mapped[str] = mapped_column(String(128), default="", index=True)
+    display_name: Mapped[str] = mapped_column(String(128), default="")
+    audit_enabled: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    notes: Mapped[str] = mapped_column(Text, default="")
+    first_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
 class AuditClassification(Base):
     __tablename__ = "audit_classifications"
     __table_args__ = (UniqueConstraint("request_id", name="uq_audit_classifications_request_id"),)
