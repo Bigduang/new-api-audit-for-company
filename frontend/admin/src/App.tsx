@@ -21,7 +21,7 @@ import {
   Users,
   X,
 } from "lucide-react";
-import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useState } from "react";
+import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -157,12 +157,14 @@ const NAV_ITEMS = [
 
 function App() {
   const [path, setPath] = useState(currentPath());
+  const [search, setSearch] = useState(currentSearch());
   const [session, setSession] = useState<SessionInfo | null>(null);
   const [loading, setLoading] = useState(true);
 
   const navigate = useCallback((to: string) => {
     window.history.pushState({}, "", to);
     setPath(currentPath());
+    setSearch(currentSearch());
   }, []);
 
   const refreshSession = useCallback(async () => {
@@ -173,7 +175,10 @@ function App() {
 
   useEffect(() => {
     refreshSession().finally(() => setLoading(false));
-    const onPop = () => setPath(currentPath());
+    const onPop = () => {
+      setPath(currentPath());
+      setSearch(currentSearch());
+    };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
   }, [refreshSession]);
@@ -198,17 +203,19 @@ function App() {
 
   return (
     <AdminLayout path={path} session={session} navigate={navigate} refreshSession={refreshSession}>
-      <RouteRenderer path={path} session={session} navigate={navigate} />
+      <RouteRenderer path={path} search={search} session={session} navigate={navigate} />
     </AdminLayout>
   );
 }
 
 function RouteRenderer({
   path,
+  search,
   session,
   navigate,
 }: {
   path: string;
+  search: string;
   session: SessionInfo;
   navigate: (to: string) => void;
 }) {
@@ -220,7 +227,7 @@ function RouteRenderer({
     return <UsersPage session={session} navigate={navigate} />;
   }
   if (path === "/admin/requests") {
-    return <RequestsPage session={session} navigate={navigate} />;
+    return <RequestsPage session={session} search={search} navigate={navigate} />;
   }
   if (path === "/admin/reports/daily") {
     return <DailyReportPage />;
@@ -487,7 +494,7 @@ function DashboardPage({ navigate }: { navigate: (to: string) => void }) {
             <button
               key={user.identity_key}
               className="group w-full overflow-hidden rounded-2xl border border-white/10 bg-white/[0.045] p-4 text-left transition duration-200 hover:border-cyan-200/30 hover:bg-white/[0.08] hover:shadow-glow sm:p-5"
-              onClick={() => navigate(`/admin/users/${encodeURIComponent(user.identity_key)}`)}
+              onClick={() => navigate(`/admin/requests?user=${encodeURIComponent(user.identity_key)}`)}
             >
               <div className="grid gap-4 xl:grid-cols-[minmax(0,1.05fr)_minmax(0,1.6fr)] xl:items-center">
                 <div className="flex min-w-0 items-start gap-4">
@@ -931,15 +938,23 @@ function UserDetailLoaded({
   );
 }
 
-function RequestsPage({ session, navigate }: { session: SessionInfo; navigate: (to: string) => void }) {
+function RequestsPage({ session, search, navigate }: { session: SessionInfo; search: string; navigate: (to: string) => void }) {
   const [requests, setRequests] = useState<RequestItem[]>([]);
   const [pagination, setPagination] = useState<Pagination | null>(null);
   const [options, setOptions] = useState<RequestOptions>({ users: [], tokens: [], models: [], verdicts: [] });
-  const [filters, setFilters] = useState({ start: "", end: "", verdict: "", user: "", token: "", model: "", q: "" });
-  const [page, setPage] = useState(1);
+  const [filters, setFilters] = useState(() => parseRequestFilters(search));
+  const [page, setPage] = useState(() => parseRequestPage(search));
   const [preview, setPreview] = useState<PreviewState>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const appliedSearchRef = useRef(search);
+
+  useEffect(() => {
+    if (search === appliedSearchRef.current) return;
+    appliedSearchRef.current = search;
+    setFilters(parseRequestFilters(search));
+    setPage(parseRequestPage(search));
+  }, [search]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -1421,6 +1436,28 @@ async function apiFetch<T = unknown>(path: string, options: RequestInit = {}, cs
 
 function currentPath() {
   return window.location.pathname.replace(/\/$/, "") || "/admin";
+}
+
+function currentSearch() {
+  return window.location.search;
+}
+
+function parseRequestFilters(search: string) {
+  const params = new URLSearchParams(search);
+  return {
+    start: params.get("start") || "",
+    end: params.get("end") || "",
+    verdict: params.get("verdict") || "",
+    user: params.get("user") || "",
+    token: params.get("token") || "",
+    model: params.get("model") || "",
+    q: params.get("q") || "",
+  };
+}
+
+function parseRequestPage(search: string) {
+  const page = Number(new URLSearchParams(search).get("page") || 1);
+  return Number.isFinite(page) && page > 0 ? Math.floor(page) : 1;
 }
 
 function isActiveNav(path: string, itemPath: string) {
