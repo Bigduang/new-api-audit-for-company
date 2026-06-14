@@ -1,0 +1,17 @@
+[project]
+name = "token-audit"
+version = "0.1.0"
+description = "Independent token usage and work-purpose audit service for New-API."
+requires-python = ">=3.12"
+dependencies = [
+    "cryptography>=46",
+    "fastapi>=0.110",
+    "pydantic>=2",
+    "requests>=2.31",
+    "sqlalchemy>=2",
+    "uvicorn>=0.30",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

@@ -1,0 +1,528 @@
+diff --git a/audit/sender.go b/audit/sender.go
+new file mode 100644
+index 00000000..58954973
+--- /dev/null
++++ b/audit/sender.go
+@@ -0,0 +1,278 @@
++package audit
++
++import (
++	"bytes"
++	"crypto/hmac"
++	"crypto/sha256"
++	"encoding/hex"
++	"encoding/json"
++	"log"
++	"net/http"
++	"os"
++	"strconv"
++	"strings"
++	"sync"
++	"time"
++	"unicode/utf8"
++)
++
++const (
++	requestPath = "/internal/new-api/audit/request"
++	usagePath   = "/internal/new-api/audit/usage"
++)
++
++type RequestEvent struct {
++	RequestId     string `json:"request_id"`
++	CreatedAt     string `json:"created_at"`
++	UserId        int    `json:"user_id"`
++	Username      string `json:"username"`
++	TokenId       int    `json:"token_id"`
++	TokenName     string `json:"token_name"`
++	ModelName     string `json:"model_name"`
++	RequestPath   string `json:"request_path"`
++	RelayFormat   string `json:"relay_format"`
++	IsStream      bool   `json:"is_stream"`
++	PromptHash    string `json:"prompt_hash"`
++	PromptPreview string `json:"prompt_preview"`
++	PromptText    string `json:"prompt_text"`
++	PromptLen     int    `json:"prompt_len,omitempty"`
++	PromptOmitted bool   `json:"prompt_omitted,omitempty"`
++}
++
++type UsageEvent struct {
++	RequestId         string `json:"request_id"`
++	CreatedAt         string `json:"created_at"`
++	UserId            int    `json:"user_id"`
++	Username          string `json:"username"`
++	TokenId           int    `json:"token_id"`
++	TokenName         string `json:"token_name"`
++	ModelName         string `json:"model_name"`
++	PromptTokens      int    `json:"prompt_tokens"`
++	CompletionTokens  int    `json:"completion_tokens"`
++	Quota             int    `json:"quota"`
++	ChannelId         int    `json:"channel_id"`
++	Group             string `json:"group"`
++	UseTimeSeconds    int    `json:"use_time_seconds"`
++	IsStream          bool   `json:"is_stream"`
++	UpstreamRequestId string `json:"upstream_request_id"`
++}
++
++type config struct {
++	enabled       bool
++	endpoint      string
++	secret        string
++	timeout       time.Duration
++	maxEventBytes int
++	excluded      map[string]struct{}
++}
++
++type outboundEvent struct {
++	path string
++	body []byte
++}
++
++var (
++	initOnce sync.Once
++	cfg      config
++	queue    chan outboundEvent
++)
++
++func EnabledForToken(tokenName string) bool {
++	c := getConfig()
++	if !c.enabled {
++		return false
++	}
++	_, excluded := c.excluded[tokenName]
++	return !excluded
++}
++
++func HashText(text string) string {
++	sum := sha256.Sum256([]byte(text))
++	return hex.EncodeToString(sum[:])
++}
++
++func PreviewText(text string, limit int) string {
++	compact := strings.Join(strings.Fields(strings.ReplaceAll(text, "\r", "\n")), " ")
++	if limit <= 0 || len(compact) <= limit {
++		return compact
++	}
++	runes := []rune(compact)
++	if len(runes) <= limit {
++		return compact
++	}
++	return string(runes[:limit]) + "..."
++}
++
++func EnqueueRequest(event RequestEvent) {
++	if strings.TrimSpace(event.RequestId) == "" {
++		return
++	}
++	enqueue(requestPath, event.TokenName, event)
++}
++
++func EnqueueUsage(event UsageEvent) {
++	if strings.TrimSpace(event.RequestId) == "" {
++		return
++	}
++	enqueue(usagePath, event.TokenName, event)
++}
++
++func enqueue(path string, tokenName string, payload interface{}) {
++	c := getConfig()
++	if !c.enabled {
++		return
++	}
++	if _, excluded := c.excluded[tokenName]; excluded {
++		return
++	}
++	body, err := json.Marshal(payload)
++	if err != nil {
++		log.Printf("audit: marshal event failed: %v", err)
++		return
++	}
++	if c.maxEventBytes > 0 && len(body) > c.maxEventBytes {
++		compacted, compactedSize, ok := compactOversizedEvent(path, payload, c.maxEventBytes)
++		if !ok {
++			log.Printf("audit: event too large, dropping event path=%s size=%d max=%d", path, len(body), c.maxEventBytes)
++			return
++		}
++		log.Printf("audit: event too large, sending compacted event path=%s original_size=%d compacted_size=%d max=%d", path, len(body), compactedSize, c.maxEventBytes)
++		body = compacted
++	}
++	select {
++	case queue <- outboundEvent{path: path, body: body}:
++	default:
++		log.Printf("audit: queue full, dropping event path=%s", path)
++	}
++}
++
++func compactOversizedEvent(path string, payload interface{}, maxEventBytes int) ([]byte, int, bool) {
++	if path != requestPath {
++		return nil, 0, false
++	}
++	event, ok := payload.(RequestEvent)
++	if !ok {
++		return nil, 0, false
++	}
++	if event.PromptLen <= 0 {
++		event.PromptLen = utf8.RuneCountInString(event.PromptText)
++	}
++	if event.PromptHash == "" {
++		event.PromptHash = HashText(event.PromptText)
++	}
++	if event.PromptPreview == "" {
++		event.PromptPreview = PreviewText(event.PromptText, 500)
++	}
++	event.PromptText = ""
++	event.PromptOmitted = true
++	body, err := json.Marshal(event)
++	if err != nil {
++		log.Printf("audit: compact oversized request event failed: %v", err)
++		return nil, 0, false
++	}
++	if maxEventBytes > 0 && len(body) > maxEventBytes {
++		return nil, len(body), false
++	}
++	return body, len(body), true
++}
++
++func getConfig() config {
++	initOnce.Do(initConfig)
++	return cfg
++}
++
++func initConfig() {
++	queueSize := getenvInt("AUDIT_QUEUE_SIZE", 1000)
++	cfg = config{
++		enabled:       getenvBool("AUDIT_ENABLED", false),
++		endpoint:      strings.TrimRight(os.Getenv("AUDIT_ENDPOINT"), "/"),
++		secret:        os.Getenv("AUDIT_SECRET"),
++		timeout:       time.Duration(getenvInt("AUDIT_TIMEOUT_MS", 800)) * time.Millisecond,
++		maxEventBytes: getenvInt("AUDIT_MAX_EVENT_BYTES", 1024*1024),
++		excluded:      parseExcluded(os.Getenv("AUDIT_EXCLUDED_TOKEN_NAMES")),
++	}
++	if queueSize <= 0 {
++		queueSize = 1000
++	}
++	queue = make(chan outboundEvent, queueSize)
++	if !cfg.enabled {
++		return
++	}
++	if cfg.endpoint == "" || cfg.secret == "" {
++		cfg.enabled = false
++		log.Printf("audit: disabled because AUDIT_ENDPOINT or AUDIT_SECRET is empty")
++		return
++	}
++	go worker(cfg)
++}
++
++func worker(c config) {
++	client := &http.Client{Timeout: c.timeout}
++	for event := range queue {
++		ts := strconv.FormatInt(time.Now().Unix(), 10)
++		signature := sign(c.secret, ts, event.body)
++		req, err := http.NewRequest(http.MethodPost, c.endpoint+event.path, bytes.NewReader(event.body))
++		if err != nil {
++			log.Printf("audit: build request failed: %v", err)
++			continue
++		}
++		req.Header.Set("Content-Type", "application/json")
++		req.Header.Set("X-Audit-Timestamp", ts)
++		req.Header.Set("X-Audit-Signature", signature)
++		resp, err := client.Do(req)
++		if err != nil {
++			log.Printf("audit: send failed: %v", err)
++			continue
++		}
++		if resp.Body != nil {
++			_ = resp.Body.Close()
++		}
++		if resp.StatusCode >= 400 {
++			log.Printf("audit: endpoint returned status=%d path=%s", resp.StatusCode, event.path)
++		}
++	}
++}
++
++func sign(secret string, timestamp string, body []byte) string {
++	mac := hmac.New(sha256.New, []byte(secret))
++	mac.Write([]byte(timestamp))
++	mac.Write([]byte("."))
++	mac.Write(body)
++	return hex.EncodeToString(mac.Sum(nil))
++}
++
++func getenvBool(name string, defaultValue bool) bool {
++	raw := strings.TrimSpace(os.Getenv(name))
++	if raw == "" {
++		return defaultValue
++	}
++	switch strings.ToLower(raw) {
++	case "1", "true", "yes", "y", "on":
++		return true
++	default:
++		return false
++	}
++}
++
++func getenvInt(name string, defaultValue int) int {
++	raw := strings.TrimSpace(os.Getenv(name))
++	if raw == "" {
++		return defaultValue
++	}
++	value, err := strconv.Atoi(raw)
++	if err != nil {
++		return defaultValue
++	}
++	return value
++}
++
++func parseExcluded(raw string) map[string]struct{} {
++	result := map[string]struct{}{}
++	for _, item := range strings.Split(raw, ",") {
++		item = strings.TrimSpace(item)
++		if item != "" {
++			result[item] = struct{}{}
++		}
++	}
++	return result
++}
+diff --git a/audit/sender_test.go b/audit/sender_test.go
+new file mode 100644
+index 00000000..68c77bc4
+--- /dev/null
++++ b/audit/sender_test.go
+@@ -0,0 +1,135 @@
++package audit
++
++import (
++	"encoding/json"
++	"strings"
++	"sync"
++	"testing"
++	"time"
++	"unicode/utf8"
++)
++
++func useTestConfig(c config, q chan outboundEvent) {
++	initOnce = sync.Once{}
++	initOnce.Do(func() {
++		cfg = c
++		queue = q
++	})
++}
++
++func TestEnqueueDropsWhenQueueIsFull(t *testing.T) {
++	q := make(chan outboundEvent, 1)
++	useTestConfig(config{enabled: true, excluded: map[string]struct{}{}}, q)
++
++	EnqueueUsage(UsageEvent{RequestId: "req-1"})
++
++	done := make(chan struct{})
++	go func() {
++		EnqueueUsage(UsageEvent{RequestId: "req-2"})
++		close(done)
++	}()
++
++	select {
++	case <-done:
++	case <-time.After(100 * time.Millisecond):
++		t.Fatal("enqueue blocked when queue was full")
++	}
++}
++
++func TestEnqueueDropsRequestWithoutRequestId(t *testing.T) {
++	q := make(chan outboundEvent, 1)
++	useTestConfig(config{enabled: true, excluded: map[string]struct{}{}}, q)
++
++	EnqueueRequest(RequestEvent{RequestId: " \t\n", PromptText: "hello"})
++
++	select {
++	case event := <-q:
++		t.Fatalf("expected request without request_id to be dropped, got %s", event.path)
++	default:
++	}
++}
++
++func TestEnqueueDropsUsageWithoutRequestId(t *testing.T) {
++	q := make(chan outboundEvent, 1)
++	useTestConfig(config{enabled: true, excluded: map[string]struct{}{}}, q)
++
++	EnqueueUsage(UsageEvent{RequestId: ""})
++
++	select {
++	case event := <-q:
++		t.Fatalf("expected usage without request_id to be dropped, got %s", event.path)
++	default:
++	}
++}
++
++func TestEnqueueDropsOversizedEvent(t *testing.T) {
++	q := make(chan outboundEvent, 1)
++	useTestConfig(config{enabled: true, maxEventBytes: 64, excluded: map[string]struct{}{}}, q)
++
++	EnqueueRequest(RequestEvent{
++		RequestId:  "req-large",
++		PromptText: "this prompt is intentionally long enough to exceed the tiny test limit",
++	})
++
++	select {
++	case event := <-q:
++		t.Fatalf("expected oversized event to be dropped, got %s", event.path)
++	default:
++	}
++}
++
++func TestEnqueueCompactsOversizedRequestEvent(t *testing.T) {
++	q := make(chan outboundEvent, 1)
++	useTestConfig(config{enabled: true, maxEventBytes: 1200, excluded: map[string]struct{}{}}, q)
++
++	largePrompt := strings.Repeat("x", 5000)
++	EnqueueRequest(RequestEvent{
++		RequestId:     "req-large",
++		UserId:        7,
++		Username:      "alice",
++		TokenId:       11,
++		TokenName:     "coding",
++		ModelName:     "gpt-test",
++		PromptHash:    HashText(largePrompt),
++		PromptPreview: PreviewText(largePrompt, 500),
++		PromptText:    largePrompt,
++	})
++
++	select {
++	case event := <-q:
++		if event.path != requestPath {
++			t.Fatalf("unexpected path: %s", event.path)
++		}
++		if len(event.body) > 1200 {
++			t.Fatalf("compacted event is still too large: %d", len(event.body))
++		}
++		var payload RequestEvent
++		if err := json.Unmarshal(event.body, &payload); err != nil {
++			t.Fatalf("failed to unmarshal compacted event: %v", err)
++		}
++		if !payload.PromptOmitted {
++			t.Fatal("expected prompt_omitted=true")
++		}
++		if payload.PromptText != "" {
++			t.Fatal("expected prompt_text to be omitted")
++		}
++		if payload.PromptLen != 5000 {
++			t.Fatalf("unexpected prompt_len: %d", payload.PromptLen)
++		}
++		if payload.PromptPreview == "" || payload.PromptHash == "" {
++			t.Fatal("expected preview and hash to be preserved")
++		}
++	default:
++		t.Fatal("expected compacted request event to be queued")
++	}
++}
++
++func TestPreviewTextDoesNotSplitMultibyteCharacters(t *testing.T) {
++	preview := PreviewText("你好 世界 测试", 4)
++	if !utf8.ValidString(preview) {
++		t.Fatalf("preview is not valid utf-8: %q", preview)
++	}
++	if preview != "你好 世..." {
++		t.Fatalf("unexpected preview: %q", preview)
++	}
++}
+diff --git a/controller/relay.go b/controller/relay.go
+index 1d14dcc6..51766773 100644
+--- a/controller/relay.go
++++ b/controller/relay.go
+@@ -9,6 +9,7 @@ import (
+ 	"strings"
+ 	"time"
+ 
++	"github.com/QuantumNous/new-api/audit"
+ 	"github.com/QuantumNous/new-api/common"
+ 	"github.com/QuantumNous/new-api/constant"
+ 	"github.com/QuantumNous/new-api/dto"
+@@ -125,14 +126,34 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
+ 
+ 	needSensitiveCheck := setting.ShouldCheckPromptSensitive()
+ 	needCountToken := constant.CountToken
++	needAuditPrompt := audit.EnabledForToken(c.GetString("token_name"))
+ 	// Avoid building huge CombineText (strings.Join) when token counting and sensitive check are both disabled.
+ 	var meta *types.TokenCountMeta
+-	if needSensitiveCheck || needCountToken {
++	if needSensitiveCheck || needCountToken || needAuditPrompt {
+ 		meta = request.GetTokenCountMeta()
+ 	} else {
+ 		meta = fastTokenCountMetaForPricing(request)
+ 	}
+ 
++	if needAuditPrompt && meta != nil {
++		promptText := meta.CombineText
++		audit.EnqueueRequest(audit.RequestEvent{
++			RequestId:     requestId,
++			CreatedAt:     time.Now().UTC().Format(time.RFC3339Nano),
++			UserId:        relayInfo.UserId,
++			Username:      c.GetString("username"),
++			TokenId:       relayInfo.TokenId,
++			TokenName:     c.GetString("token_name"),
++			ModelName:     relayInfo.OriginModelName,
++			RequestPath:   c.Request.URL.Path,
++			RelayFormat:   string(relayFormat),
++			IsStream:      relayInfo.IsStream,
++			PromptHash:    audit.HashText(promptText),
++			PromptPreview: audit.PreviewText(promptText, 500),
++			PromptText:    promptText,
++		})
++	}
++
+ 	if needSensitiveCheck && meta != nil {
+ 		contains, words := service.CheckSensitiveText(meta.CombineText)
+ 		if contains {
+diff --git a/model/log.go b/model/log.go
+index cbcc3983..056cd16f 100644
+--- a/model/log.go
++++ b/model/log.go
+@@ -7,6 +7,7 @@ import (
+ 	"strings"
+ 	"time"
+ 
++	"github.com/QuantumNous/new-api/audit"
+ 	"github.com/QuantumNous/new-api/common"
+ 	"github.com/QuantumNous/new-api/logger"
+ 	"github.com/QuantumNous/new-api/types"
+@@ -221,6 +222,7 @@ type RecordConsumeLogParams struct {
+ 
+ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams) {
+ 	if !common.LogConsumeEnabled {
++		enqueueAuditUsage(c, userId, params)
+ 		return
+ 	}
+ 	logger.LogInfo(c, fmt.Sprintf("record consume log: userId=%d, params=%s", userId, common.GetJsonString(params)))
+@@ -265,6 +267,7 @@ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams)
+ 	if err != nil {
+ 		logger.LogError(c, "failed to record log: "+err.Error())
+ 	}
++	enqueueAuditUsage(c, userId, params)
+ 	if common.DataExportEnabled {
+ 		gopool.Go(func() {
+ 			LogQuotaData(userId, username, params.ModelName, params.Quota, common.GetTimestamp(), params.PromptTokens+params.CompletionTokens)
+@@ -272,6 +275,26 @@ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams)
+ 	}
+ }
+ 
++func enqueueAuditUsage(c *gin.Context, userId int, params RecordConsumeLogParams) {
++	audit.EnqueueUsage(audit.UsageEvent{
++		RequestId:         c.GetString(common.RequestIdKey),
++		CreatedAt:         time.Now().UTC().Format(time.RFC3339Nano),
++		UserId:            userId,
++		Username:          c.GetString("username"),
++		TokenId:           params.TokenId,
++		TokenName:         params.TokenName,
++		ModelName:         params.ModelName,
++		PromptTokens:      params.PromptTokens,
++		CompletionTokens:  params.CompletionTokens,
++		Quota:             params.Quota,
++		ChannelId:         params.ChannelId,
++		Group:             params.Group,
++		UseTimeSeconds:    params.UseTimeSeconds,
++		IsStream:          params.IsStream,
++		UpstreamRequestId: c.GetString(common.UpstreamRequestIdKey),
++	})
++}
++
+ type RecordTaskBillingLogParams struct {
+ 	UserId    int
+ 	LogType   int

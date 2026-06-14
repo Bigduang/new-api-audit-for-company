@@ -1,0 +1,6 @@
+cryptography>=46
+fastapi>=0.110
+pydantic>=2
+requests>=2.31
+sqlalchemy>=2
+uvicorn>=0.30
