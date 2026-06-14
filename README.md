@@ -400,7 +400,7 @@ uvicorn token_audit.main:app --host 0.0.0.0 --port 8000
 
 ## 友情链接
 
-- [LINUX DO](https://linux.do/)：高质量技术社区。
+- [LinuxDO](https://linux.do/)：高质量技术社区。
 
 ## License
 
