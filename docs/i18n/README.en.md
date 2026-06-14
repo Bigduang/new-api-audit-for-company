@@ -6,7 +6,7 @@ Languages: [中文](../../README.md) | English | [日本語](README.ja.md) | [�
 
 ## Purpose
 
-`token-audit` receives signed audit events from a small New-API fork, joins request and usage events by `request_id`, stores them in local SQLite, classifies whether the request was work-related, and generates daily audit reports.
+`token-audit` receives signed audit events from [Bigduang/new-api-audit](https://github.com/Bigduang/new-api-audit), joins request and usage events by `request_id`, stores them in local SQLite, classifies whether the request was work-related, and generates daily audit reports.
 
 The service is designed for a small company relay stack running on a VPS. It favors availability and traceability over real-time blocking: New-API must continue serving users even if the audit endpoint is temporarily unavailable.
 

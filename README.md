@@ -6,7 +6,7 @@ New-API Token 使用与工作用途审计服务。
 
 ## 项目定位
 
-`token-audit` 是一个独立运行的审计服务，用来接收 New-API fork 上报的审计事件，按 `request_id` 合并请求内容和最终用量，保存到本地 SQLite，并在每天用量稳定后生成审计日报。
+`token-audit` 是一个独立运行的审计服务，用来接收 [Bigduang/new-api-audit](https://github.com/Bigduang/new-api-audit) 上报的审计事件，按 `request_id` 合并请求内容和最终用量，保存到本地 SQLite，并在每天用量稳定后生成审计日报。
 
 它解决的问题不是“实时限流”，而是“事后可追溯”：
 
@@ -165,7 +165,7 @@ python -m token_audit.cli migrate
 
 ## New-API 对接
 
-推荐使用已经包含审计 hook 的 New-API fork，而不是在服务器上手工打补丁。仓库中 `patches/new-api-audit-hook.patch` 保留为历史参考和二开对照。
+推荐使用已经包含审计 hook 的 [Bigduang/new-api-audit](https://github.com/Bigduang/new-api-audit)，而不是在服务器上手工打补丁。仓库中 `patches/new-api-audit-hook.patch` 保留为历史参考和二开对照。
 
 New-API 侧配置：
 

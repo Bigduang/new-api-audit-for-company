@@ -6,7 +6,7 @@ New-API용 Token 사용량 및 업무 목적 감사 서비스입니다.
 
 ## 목적
 
-`token-audit`는 New-API fork가 전송하는 서명된 감사 이벤트를 수신하고, `request_id`로 request event와 usage event를 합쳐 로컬 SQLite에 저장합니다. 이후 요청이 업무 목적이었는지 분류하고 일일 감사 리포트를 생성합니다.
+`token-audit`는 [Bigduang/new-api-audit](https://github.com/Bigduang/new-api-audit)가 전송하는 서명된 감사 이벤트를 수신하고, `request_id`로 request event와 usage event를 합쳐 로컬 SQLite에 저장합니다. 이후 요청이 업무 목적이었는지 분류하고 일일 감사 리포트를 생성합니다.
 
 이 서비스는 VPS에서 운영되는 소규모 사내 중계 환경을 기준으로 설계되었습니다. 실시간 차단보다 사후 추적과 감사에 초점을 둡니다. 감사 서비스가 일시적으로 장애가 나더라도 New-API의 정상 요청은 계속 처리되어야 합니다.
 
