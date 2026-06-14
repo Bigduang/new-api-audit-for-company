@@ -3,6 +3,7 @@ name = "token-audit"
 version = "0.1.0"
 description = "Independent token usage and work-purpose audit service for New-API."
 requires-python = ">=3.12"
+license = { text = "MIT" }
 dependencies = [
     "cryptography>=46",
     "fastapi>=0.110",

@@ -397,3 +397,7 @@ uvicorn token_audit.main:app --host 0.0.0.0 --port 8000
 - 审计时间：每天早上约 06:05，处理前一天数据。
 - 管理端路径：`/admin/login`。
 - New-API 正常流量优先，审计失败不能影响中转站可用性。
+
+## License
+
+This project is open-sourced under the [MIT License](LICENSE).
