@@ -1,5 +1,11 @@
 # new-api 审计补丁
 
+> **归属说明（2026-09-30）**：审计钩子的**源码真相在另一个仓库** ——
+> [`Bigduang/new-api-audit`](https://github.com/Bigduang/new-api-audit)（上游 `QuantumNous/new-api` 的 fork）。
+> 该 fork 已同步到上游 **v1.0.0-rc.40**，对应 tag：`v1.0.0-rc.40-audit.20260930`，构建直接取该 tag 源码即可。
+> 本目录保留补丁副本，作用是**记录审计契约（audit hook 的字段与触发点）**，便于审计服务与网关的对齐，不作为构建来源。
+
+
 本目录保存「审计版 new-api」相对上游的定制补丁（新增 `audit/` 包 + 在 relay/日志链路埋点）。
 
 ## 文件
